@@ -55,12 +55,38 @@ int main(void) {
     printf("connection accepted from IP: %s\n", client_ip);
 
     char buffer[BUFFER_SIZE];
-    ssize_t bytes = recv(clientfd, buffer, sizeof(buffer), 0);
 
-    if (bytes > 0){
-        send(clientfd, buffer, bytes, 0);
+    while (1){
+        ssize_t bytes_read = recv(clientfd, buffer, sizeof(buffer), 0);
+
+        if (bytes_read < 0){
+            perror("recv");
+            break;
+        }
+
+        if (bytes_read == 0){
+            printf("Client disconnected!\n");
+            break;
+        }
+
+        size_t send_failed = 0;
+        ssize_t bytes_sent = 0;
+        while (bytes_sent < bytes_read){
+            ssize_t n = send(clientfd, buffer + bytes_sent, bytes_read - bytes_sent, 0);
+
+            if (n < 0){
+                perror("send");
+                send_failed = 1;
+                break;
+            }
+
+            bytes_sent += n;
+        } 
+        if (send_failed) {
+            break;
+        }
     }
-
+    
     close(clientfd);
     close(sockfd);
 
