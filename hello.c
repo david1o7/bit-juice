@@ -55,40 +55,49 @@ int main(void) {
     printf("connection accepted from IP: %s\n", client_ip);
 
     char buffer[BUFFER_SIZE];
+    ssize_t bytes_read = recv(clientfd, buffer, sizeof(buffer), 0);
 
-    while (1){
-        ssize_t bytes_read = recv(clientfd, buffer, sizeof(buffer), 0);
-
-        if (bytes_read < 0){
-            perror("recv");
-            break;
-        }
-
-        if (bytes_read == 0){
-            printf("Client disconnected!\n");
-            break;
-        }
-
-        size_t send_failed = 0;
-        ssize_t bytes_sent = 0;
-        while (bytes_sent < bytes_read){
-            ssize_t n = send(clientfd, buffer + bytes_sent, bytes_read - bytes_sent, 0);
-
-            if (n < 0){
-                perror("send");
-                send_failed = 1;
-                break;
-            }
-
-            bytes_sent += n;
-        } 
-        if (send_failed) {
-            break;
-        }
+    if (bytes_read < 0){
+        perror("recv");
+        goto cleanup;
     }
-    
-    close(clientfd);
-    close(sockfd);
+
+    if (bytes_read == 0){
+        printf("Client disconnected!\n");
+        goto cleanup;
+    }
+
+    const char *body = "Hello, world!\n";
+    size_t body_len = strlen(body);
+
+    char response[BUFFER_SIZE];
+    int response_len = snprintf(response, sizeof(response), 
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "%s",
+        body_len, body);
+    if (response_len < 0 || response_len >= (int)sizeof(response)){
+        fprintf(stderr, "Buffer is too small/encoding error\n");
+        goto cleanup;
+    }
+
+    ssize_t bytes_sent = 0;
+    while (bytes_sent < response_len){
+        ssize_t n = send(clientfd, response + bytes_sent, response_len - bytes_sent, 0);
+
+        if (n < 0){
+            perror("send");
+            break;
+            }
+            bytes_sent += n;
+    } 
+
+    cleanup:
+        close(clientfd);
+        close(sockfd);
 
     return 0;
 }
