@@ -67,18 +67,37 @@ int main(void) {
         goto cleanup;
     }
 
-    const char *body = "Hello, world!\n";
+    if (bytes_read >= BUFFER_SIZE){
+        bytes_read = BUFFER_SIZE - 1;
+    }
+
+    buffer[bytes_read]= '\0';
+
+    printf("-Raw client request-\n%s\n---\n", buffer);
+
+    const char *status_line;
+    const char *body;
+
+    if (strncmp(buffer, "GET ", 4) == 0){
+        status_line = "HTTP/1.1 200 OK";
+        body = "Hello, World!\n";
+    } else {
+        status_line = "HTTP/1.1 405 Method Not Allowed";
+        body = "Method Not Allowed\n";
+    }
+
     size_t body_len = strlen(body);
 
     char response[BUFFER_SIZE];
     int response_len = snprintf(response, sizeof(response), 
-        "HTTP/1.1 200 OK\r\n"
+        "%s\r\n"
         "Content-Type: text/plain\r\n"
         "Content-Length: %zu\r\n"
         "Connection: close\r\n"
         "\r\n"
         "%s",
-        body_len, body);
+        status_line, body_len, body);
+
     if (response_len < 0 || response_len >= (int)sizeof(response)){
         fprintf(stderr, "Buffer is too small/encoding error\n");
         goto cleanup;
