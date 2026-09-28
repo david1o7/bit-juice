@@ -42,14 +42,17 @@ int main(void) {
         return 1;
     }
 
+    printf("Server listening on port %d...\n", PORT);
+
+    while(1){
+
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
 
     int clientfd = accept(sockfd, (struct sockaddr *)&client_addr, &client_len);
     if (clientfd < 0){
         perror("accept");
-        close(sockfd);
-        return 1;
+        continue;
     }
 
     char *client_ip = inet_ntoa(client_addr.sin_addr);
@@ -63,12 +66,12 @@ int main(void) {
 
     if (bytes_read < 0){
         perror("recv");
-        goto cleanup;
+        break;
     }
 
     if (bytes_read == 0){
         printf("Client disconnected!\n");
-        goto cleanup;
+        break;
     }
 
     buffer[bytes_read]= '\0';
@@ -104,12 +107,18 @@ int main(void) {
     const char *status_line;
     const char *body;
 
-    if (strcmp(method, "GET") == 0){
-        status_line = "HTTP/1.1 200 OK";
-        body = "Hello, World!\n";
-    } else {
+    if (strcmp(method, "GET") != 0){
         status_line = "HTTP/1.1 405 Method Not Allowed";
-        body = "Method Not Allowed\n";
+        body = "Method Not Allowed.\n";
+    } else if(strcmp(path, "/") == 0) {
+        status_line = "HTTP/1.1 200 OK";
+        body = "Howdy partner, welcome to my http server.\n";
+    } else if(strcmp(path, "/about") == 0){
+        status_line = "HTTP/1.1 200 OK";
+        body = "Howdy partner, welcome to my about page.\nP.S i am a programmer.\n";
+    } else {
+        status_line = "HTTP/1.1 404 Not Found";
+        body = "404 Not Found\n.";
     }
 
     size_t body_len = strlen(body);
@@ -126,18 +135,24 @@ int main(void) {
 
     if (response_len < 0 || response_len >= (int)sizeof(response)){
         fprintf(stderr, "Buffer is too small/encoding error\n");
-        goto cleanup;
+        break;
     }
 
+    int send_failed = 0;
     ssize_t bytes_sent = 0;
     while (bytes_sent < response_len){
         ssize_t n = send(clientfd, response + bytes_sent, response_len - bytes_sent, 0);
 
         if (n < 0){
             perror("send");
-            goto cleanup;
+            send_failed = 1;
+            break;
             }
             bytes_sent += n;
+    }
+
+    if(send_failed){
+        break;
     }
 
     if (!keep_alive){
@@ -146,9 +161,11 @@ int main(void) {
 
     }
 
-    cleanup:
-        close(clientfd);
-        close(sockfd);
+    close(clientfd);
+    printf("Client %s disconnected waiting for next client...\n", client_ip);
 
+}
+
+    close(sockfd);
     return 0;
 }
