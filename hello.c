@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <netinet/in.h>
 #include <string.h>
@@ -54,8 +55,11 @@ int main(void) {
     char *client_ip = inet_ntoa(client_addr.sin_addr);
     printf("connection accepted from IP: %s\n", client_ip);
 
+    while(1) {
+
+    int keep_alive = 1;
     char buffer[BUFFER_SIZE];
-    ssize_t bytes_read = recv(clientfd, buffer, sizeof(buffer), 0);
+    ssize_t bytes_read = recv(clientfd, buffer, sizeof(buffer) - 1, 0);
 
     if (bytes_read < 0){
         perror("recv");
@@ -67,18 +71,40 @@ int main(void) {
         goto cleanup;
     }
 
-    if (bytes_read >= BUFFER_SIZE){
-        bytes_read = BUFFER_SIZE - 1;
-    }
-
     buffer[bytes_read]= '\0';
 
+    if (strcasestr(buffer, "Connection: close") != NULL){
+        keep_alive = 0;
+    }
+
     printf("-Raw client request-\n%s\n---\n", buffer);
+
+    char method[16] = {0};
+    char path[256] = {0};
+    char version[16] = {0};
+
+    int matched = sscanf(buffer, "%15s %255s %15s", method, path, version);
+
+    if (matched != 3){
+        const char *fail = 
+        "HTTP/1.1 400 Bad Request\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 15\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "400 Bad Request\n";
+
+        send(clientfd, fail, strlen(fail), 0);
+
+        break;
+    }
+
+    printf("Method: %s\nPath: %s\nVersion: %s\n", method, path, version);
 
     const char *status_line;
     const char *body;
 
-    if (strncmp(buffer, "GET ", 4) == 0){
+    if (strcmp(method, "GET") == 0){
         status_line = "HTTP/1.1 200 OK";
         body = "Hello, World!\n";
     } else {
@@ -93,10 +119,10 @@ int main(void) {
         "%s\r\n"
         "Content-Type: text/plain\r\n"
         "Content-Length: %zu\r\n"
-        "Connection: close\r\n"
+        "Connection: %s\r\n"
         "\r\n"
         "%s",
-        status_line, body_len, body);
+        status_line, body_len,(keep_alive)? "keep-alive" : "close", body);
 
     if (response_len < 0 || response_len >= (int)sizeof(response)){
         fprintf(stderr, "Buffer is too small/encoding error\n");
@@ -109,10 +135,16 @@ int main(void) {
 
         if (n < 0){
             perror("send");
-            break;
+            goto cleanup;
             }
             bytes_sent += n;
-    } 
+    }
+
+    if (!keep_alive){
+        break;
+    }
+
+    }
 
     cleanup:
         close(clientfd);
