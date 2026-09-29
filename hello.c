@@ -10,6 +10,28 @@
 #define PORT 8080
 #define BUFFER_SIZE 4096
 
+int create_server_socket(int port){
+
+}
+
+void handle_client(int clientfd){
+
+}
+
+int parse_request(const char *buffer, char *method, char *path, char *version){
+
+}
+
+void build_response(const char *method, const char *path, 
+                    int keep_alive, char *response, size_t response_size,
+                    int *response_len){
+
+                    }
+
+int send_all(int fd, const char *data, size_t len){
+
+}
+
 int main(void) {
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0){
