@@ -6,10 +6,19 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 #define PORT 8080
 #define BUFFER_SIZE 4096
 
+void sigchild_handler(int sig){
+    (void)sig;
+
+    while (waitpid(-1, NULL, WNOHANG) > 0){
+
+    }
+}
 
 int create_server_socket(int port) {
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -131,7 +140,7 @@ void handle_client(int clientfd) {
             keep_alive = 0;
         }
 
-        printf("----- Raw request -----\n%s\n-----------------------\n", buffer);
+        printf("--- Raw request ---\n%s\n---\n", buffer);
 
         
         if (!parse_request(buffer, method, path, version)) {
@@ -174,6 +183,17 @@ int main(void) {
         return 1;
     }
 
+    struct sigaction kill_zombie_cp;
+    memset(&kill_zombie_cp, 0, sizeof(kill_zombie_cp));
+    kill_zombie_cp.sa_handler = sigchild_handler;
+    sigemptyset(&kill_zombie_cp.sa_mask);
+    kill_zombie_cp.sa_flags = SA_RESTART;
+
+    if (sigaction(SIGCHLD, &kill_zombie_cp, NULL) == -1){
+        perror("sigaction");
+        return 1;
+    }
+
     printf("Server listening on port %d...\n", PORT);
 
     while (1) {
@@ -188,10 +208,25 @@ int main(void) {
 
         printf("Connection accepted from %s\n", inet_ntoa(client_addr.sin_addr));
 
-        handle_client(clientfd);
+        pid_t pid = fork();
 
-        close(clientfd);
-        printf("Client finished. Waiting for next client...\n\n");
+        if (pid < 0) {
+            perror("fork");
+            close(clientfd);
+            continue;
+        }
+
+        if (pid == 0){
+            close(server_fd);
+            printf("[child %d] handling client\n", getpid());
+            handle_client(clientfd);
+            close(clientfd);
+            printf("[child %d] finished. Waiting for next client...\n\n", getpid());
+            exit(0);
+        } else {
+            close(clientfd);
+            printf("Parent: Spawned child %d for client\n", pid);
+        }
     }
 
     close(server_fd);
