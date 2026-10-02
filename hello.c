@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <stdio.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -11,14 +12,6 @@
 
 #define PORT 8080
 #define BUFFER_SIZE 4096
-
-void sigchild_handler(int sig){
-    (void)sig;
-
-    while (waitpid(-1, NULL, WNOHANG) > 0){
-
-    }
-}
 
 int create_server_socket(int port) {
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -176,6 +169,16 @@ void handle_client(int clientfd) {
     }
 }
 
+void *client_thread(void *args){
+    int clientfd = *(int *)args;
+    free(args);
+
+    handle_client(clientfd);
+    close(clientfd);
+
+    return NULL;
+}
+
 
 int main(void) {
     int server_fd = create_server_socket(PORT);
@@ -208,25 +211,24 @@ int main(void) {
 
         printf("Connection accepted from %s\n", inet_ntoa(client_addr.sin_addr));
 
-        pid_t pid = fork();
-
-        if (pid < 0) {
-            perror("fork");
+        int *client_ptr = malloc(sizeof(int));
+        if(!client_ptr) {
+            perror("malloc");
             close(clientfd);
             continue;
         }
 
-        if (pid == 0){
-            close(server_fd);
-            printf("[child %d] handling client\n", getpid());
-            handle_client(clientfd);
+        *client_ptr = clientfd;
+
+        pthread_t thread_id;
+        if (pthread_create(&thread_id, NULL, client_thread, client_ptr) != 0){
+            perror("pthread_create");
+            free(client_ptr);
             close(clientfd);
-            printf("[child %d] finished. Waiting for next client...\n\n", getpid());
-            exit(0);
-        } else {
-            close(clientfd);
-            printf("Parent: Spawned child %d for client\n", pid);
+            continue;
         }
+
+        pthread_detach(thread_id);
     }
 
     close(server_fd);
