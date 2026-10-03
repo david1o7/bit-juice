@@ -1,66 +1,16 @@
 #define _GNU_SOURCE
+#include "http.h"
+#include "server.h"
+
+#include <sys/time.h>
+#include <errno.h>
 #include <stdio.h>
-#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <signal.h>
-#include <sys/wait.h>
+#include <pthread.h>
 
-#define PORT 8080
 #define BUFFER_SIZE 4096
-
-int create_server_socket(int port) {
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
-        perror("socket");
-        return -1;
-    }
-
-    int opt = 1;
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        perror("setsockopt");
-        close(sockfd);
-        return -1;
-    }
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = INADDR_ANY;
-
-    if (bind(sockfd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("bind");
-        close(sockfd);
-        return -1;
-    }
-
-    if (listen(sockfd, 10) < 0) {
-        perror("listen");
-        close(sockfd);
-        return -1;
-    }
-
-    return sockfd;
-}
-
-int send_all(int fd, const char *data, size_t len) {
-    size_t total_sent = 0;
-
-    while (total_sent < len) {
-        ssize_t n = send(fd, data + total_sent, len - total_sent, 0);
-        if (n < 0) {
-            perror("send");
-            return -1;
-        }
-        total_sent += n;
-    }
-    return 0;
-}
 
 int parse_request(const char *buffer, char *method, char *path, char *version) {
     int matched = sscanf(buffer, "%15s %255s %15s", method, path, version);
@@ -118,8 +68,12 @@ void handle_client(int clientfd) {
         ssize_t bytes_read = recv(clientfd, buffer, sizeof(buffer) - 1, 0);
 
         if (bytes_read < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK){
+                printf("Client timed out\n");
+            } else {
             perror("recv");
             break;
+            }
         }
         if (bytes_read == 0) {
             printf("Client disconnected\n");
@@ -169,68 +123,25 @@ void handle_client(int clientfd) {
     }
 }
 
-void *client_thread(void *args){
-    int clientfd = *(int *)args;
-    free(args);
+void *client_thread(void *arg) {
+    int clientfd = *(int *)arg;
+    free(arg);
+
+    struct timeval start_time, finish_time;
+
+    gettimeofday(&start_time, NULL);
 
     handle_client(clientfd);
+
+    gettimeofday(&finish_time, NULL);
+
+    double start_secs = start_time.tv_sec + (start_time.tv_usec / 1000000.0);
+    double end_secs = finish_time.tv_sec + (finish_time.tv_usec / 1000000.0);
+    double elapsed_time = end_secs - start_secs;
+
+    printf("Done attending to client on socket %d. Time taken: %.4f seconds.\n", clientfd, elapsed_time);
+
     close(clientfd);
 
     return NULL;
-}
-
-
-int main(void) {
-    int server_fd = create_server_socket(PORT);
-    if (server_fd < 0) {
-        return 1;
-    }
-
-    struct sigaction kill_zombie_cp;
-    memset(&kill_zombie_cp, 0, sizeof(kill_zombie_cp));
-    kill_zombie_cp.sa_handler = sigchild_handler;
-    sigemptyset(&kill_zombie_cp.sa_mask);
-    kill_zombie_cp.sa_flags = SA_RESTART;
-
-    if (sigaction(SIGCHLD, &kill_zombie_cp, NULL) == -1){
-        perror("sigaction");
-        return 1;
-    }
-
-    printf("Server listening on port %d...\n", PORT);
-
-    while (1) {
-        struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
-
-        int clientfd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
-        if (clientfd < 0) {
-            perror("accept");
-            continue;
-        }
-
-        printf("Connection accepted from %s\n", inet_ntoa(client_addr.sin_addr));
-
-        int *client_ptr = malloc(sizeof(int));
-        if(!client_ptr) {
-            perror("malloc");
-            close(clientfd);
-            continue;
-        }
-
-        *client_ptr = clientfd;
-
-        pthread_t thread_id;
-        if (pthread_create(&thread_id, NULL, client_thread, client_ptr) != 0){
-            perror("pthread_create");
-            free(client_ptr);
-            close(clientfd);
-            continue;
-        }
-
-        pthread_detach(thread_id);
-    }
-
-    close(server_fd);
-    return 0;
 }
