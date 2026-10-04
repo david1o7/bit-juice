@@ -68,12 +68,12 @@ void handle_client(int clientfd) {
         ssize_t bytes_read = recv(clientfd, buffer, sizeof(buffer) - 1, 0);
 
         if (bytes_read < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK){
+            if(errno == EAGAIN || errno == EWOULDBLOCK){
                 printf("Client timed out\n");
             } else {
             perror("recv");
-            break;
             }
+            break;
         }
         if (bytes_read == 0) {
             printf("Client disconnected\n");
@@ -139,7 +139,7 @@ void *client_thread(void *arg) {
     double end_secs = finish_time.tv_sec + (finish_time.tv_usec / 1000000.0);
     double elapsed_time = end_secs - start_secs;
 
-    printf("Done attending to client on socket %d. Time taken: %.4f seconds.\n", clientfd, elapsed_time);
+    printf("\nDone attending to client on socket %d. Time taken: %.4f seconds.\n", clientfd, elapsed_time);
 
     close(clientfd);
 
