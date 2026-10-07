@@ -64,8 +64,24 @@ void handle_client(int clientfd) {
 
     while (1) {
         int keep_alive = 1;
+        int large_request = 0;
+        size_t total_read = 0;
 
-        ssize_t bytes_read = recv(clientfd, buffer, sizeof(buffer) - 1, 0);
+        while (1){
+        if (total_read >= BUFFER_SIZE - 1){
+            const char *bad = 
+                "HTTP/1.1 413 Content Too Large\r\n"
+                "Content-Type: text/plain\r\n"
+                "Content-Length: 21\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+                "413 Content Too Large\n";
+            send_all(clientfd, bad, strlen(bad));
+            large_request = 1;
+            break;
+        }        
+
+        ssize_t bytes_read = recv(clientfd, buffer + total_read,  BUFFER_SIZE - 1 - total_read, 0);
 
         if (bytes_read < 0) {
             if(errno == EAGAIN || errno == EWOULDBLOCK){
@@ -73,16 +89,25 @@ void handle_client(int clientfd) {
             } else {
             perror("recv");
             }
-            break;
+            return;
         }
         if (bytes_read == 0) {
             printf("Client disconnected\n");
+            return;
+        }
+
+        total_read += bytes_read;
+        buffer[total_read] = '\0';
+
+        if (strstr(buffer, "\r\n\r\n") != NULL){
             break;
         }
 
-        buffer[bytes_read] = '\0';
+        }
 
-        
+        if (large_request){
+            break;
+        }
         if (strcasestr(buffer, "Connection: close") != NULL) {
             keep_alive = 0;
         }
