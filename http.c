@@ -85,14 +85,14 @@ void handle_client(int clientfd) {
 
         if (bytes_read < 0) {
             if(errno == EAGAIN || errno == EWOULDBLOCK){
-                printf("Client timed out\n");
+                // Do nothing  
             } else {
             perror("recv");
             }
             return;
         }
         if (bytes_read == 0) {
-            printf("Client disconnected\n");
+            printf("\n[fd=%d] disconnected\n", clientfd);
             return;
         }
 
@@ -111,9 +111,6 @@ void handle_client(int clientfd) {
         if (strcasestr(buffer, "Connection: close") != NULL) {
             keep_alive = 0;
         }
-
-        printf("--- Raw request ---\n%s\n---\n", buffer);
-
         
         if (!parse_request(buffer, method, path, version)) {
             const char *bad = 
@@ -127,9 +124,8 @@ void handle_client(int clientfd) {
             break;
         }
 
-        printf("Method: %s | Path: %s | Version: %s\n", method, path, version);
-
-       
+        printf("\n[fd=%d] %s %s → handled\n", clientfd, method, path);
+        
         build_response(method, path, keep_alive, response, sizeof(response), &response_len);
 
         if (response_len < 0 || response_len >= (int)sizeof(response)) {
