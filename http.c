@@ -9,8 +9,11 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <limits.h>
 
 #define BUFFER_SIZE 4096
+
+static int serve_static_file(int clientfd, const char *doc_root, const char *url_path, int keep_alive);
 
 int parse_request(const char *buffer, char *method, char *path, char *version) {
     int matched = sscanf(buffer, "%15s %255s %15s", method, path, version);
@@ -124,6 +127,16 @@ void handle_client(int clientfd) {
             break;
         }
 
+        if (strcmp(method, "GET") == 0){
+            if (serve_static_file(clientfd, doc_root, path, keep_alive)){
+                 printf("\n[fd=%d] has been server static resource at path: %s \n", clientfd, path);
+
+                 if (!keep_alive) break;
+
+                 continue;
+            }
+        }
+
         printf("\n[fd=%d] %s %s → handled\n", clientfd, method, path);
         
         build_response(method, path, keep_alive, response, sizeof(response), &response_len);
@@ -165,4 +178,110 @@ void *client_thread(void *arg) {
     close(clientfd);
 
     return NULL;
+}
+
+static int ends_with(const char *s, const char *suffix){
+    if (!s || !suffix) return 0;
+    
+    size_t str_len = strlen(s);
+    size_t suffix_len = strlen(suffix);
+
+    if (suffix_len > str_len){
+        return 0;
+    }
+
+    return strcmp(s + (str_len - suffix_len), suffix) == 0 ? 1 : 0;
+}
+
+static const char *get_content_type(const char *path){
+    if (ends_with(path, ".html") || ends_with(path, ".htm")){
+        return "text/html; charset=UTF-8";
+    }
+    if (ends_with(path, ".css")){
+        return "text/css";
+    }
+    if (ends_with(path, ".js")) {
+        return "application/javascript";
+    }
+    if (ends_with(path, ".png")) {
+        return "image/png";
+    }
+    if (ends_with(path, ".jpg") || ends_with(path, ".jpeg")) {
+        return "image/jpeg";
+    }
+    if (ends_with(path, ".gif")) {
+        return "image/gif";
+    }
+    if (ends_with(path, ".json")) {
+        return "application/json";
+    }
+
+    return "application/octet-stream";
+}
+
+static int build_file_path(const char *doc_root, const char *url_path,
+                            char *out, size_t out_size){
+        if (url_path[0] != '/'){
+            return -1;
+        }
+
+        if (strstr(url_path, "..") != NULL) {
+            return -1;
+        }
+        const char *final_url = url_path;
+        if (strcmp(url_path, "/") == 0) {
+            final_url = "/index.html";
+        }
+
+        int bytes_written = snprintf(out, out_size, "%s%s", doc_root, final_url);
+
+        if (bytes_written >= (int)out_size) {
+            return -1;
+        }
+
+        return 0; 
+
+}
+
+static int serve_static_file(int clientfd, const char *doc_root, const char *url_path, int keep_alive){
+    char safe_path[PATH_MAX];
+
+    if ((build_file_path(doc_root, url_path, safe_path, sizeof(safe_path))) != 0){
+        return 0;
+    }
+
+    FILE *file = fopen(safe_path, "rb");
+    if (file == NULL){
+            return 0;
+    }
+
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    const char *content_type = get_content_type(safe_path);
+
+    const char *connection_header = keep_alive ? "keep-value" : "close";
+
+    char header_buffer[1024];
+    int header_len = snprintf(header_buffer, sizeof(header_buffer), 
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %ld\r\n"
+        "Connection: %s\r\n"
+        "\r\n",
+        content_type, file_size, connection_header
+        );
+
+    send_all(clientfd, header_buffer, header_len);
+
+    char file_buffer[4096];
+    size_t bytes_read;
+
+    while ((bytes_read = fread(file_buffer, 1, sizeof(file_buffer), file)) > 0){
+        send_all(clientfd, file_buffer, bytes_read);
+    }
+
+    fclose(file);
+    return 1;
 }

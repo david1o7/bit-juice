@@ -12,13 +12,14 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/time.h> 
-#include <time.h>   
+#include <time.h> 
+#include <getopt.h>  
 
 #define THREAD_POOL_SIZE 8
 #define QUEUE_SIZE 128
 #define QUEUE_MASK (QUEUE_SIZE - 1) 
-#define PORT 8080
 
+int PORT = 8080;
 int client_queue[QUEUE_SIZE];
 int queue_count = 0;
 int queue_head = 0;
@@ -26,6 +27,9 @@ int queue_tail = 0;
 
 pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t queue_cond  = PTHREAD_COND_INITIALIZER;
+
+extern const char *doc_root = "./public";
+int read_timeout_sec = 12;
 
 volatile int localserverfd = -1;
 volatile sig_atomic_t running = 1;
@@ -105,11 +109,36 @@ void handle_signal(int sig){
     }
 }
 
-int main(void) {
+int main(int argc, char *argv[]) {
 
     signal(SIGPIPE, SIG_IGN);
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
+
+    struct option long_options[] = {
+        {"port",    required_argument, 0, 'p'},
+        {"dir",     required_argument, 0, 'd'},
+        {"timeout", required_argument, 0, 't'},
+        {0, 0, 0, 0}
+    };
+
+    int opt;
+    while((opt = getopt_long(argc, argv,"p:d:t:", long_options, NULL)) != -1){
+        switch(opt){
+                case 'p':
+                    PORT = atoi(optarg); 
+                    break;
+                case 'd':
+                    doc_root = optarg;
+                    break;
+                case 't':
+                    read_timeout_sec = atoi(optarg);
+                    break;
+                case '?': 
+                    printf("Usage: %s [-p port] [-d directory]\n", argv[0]);
+                    return 1;
+        }
+    }
 
     int server_fd = create_server_socket(PORT);
     if (server_fd < 0) {
@@ -142,7 +171,7 @@ int main(void) {
         }
 
         struct timeval timeout;
-        timeout.tv_sec = 10;
+        timeout.tv_sec = read_timeout_sec;
         timeout.tv_usec = 0;
 
         if (setsockopt(clientfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
