@@ -12,6 +12,7 @@
 #include <limits.h>
 
 #define BUFFER_SIZE 4096
+#define MAX_BODY_SIZE (1024 * 1024)
 
 static int serve_static_file(int clientfd, const char *doc_root, const char *url_path, int keep_alive);
 
@@ -88,12 +89,23 @@ void handle_client(int clientfd) {
 
         if (bytes_read < 0) {
             if(errno == EAGAIN || errno == EWOULDBLOCK){
-                // Do nothing  
+                printf("\n[fd=%d] Header read timeout hit. Closing connection.\n", clientfd);
+
+                const char *timeout_res = 
+                    "HTTP/1.1 408 Request Timeout\r\n"
+                    "Content-Type: text/plain\r\n"
+                    "Content-Length: 20\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                    "408 Request Timeout\n";
+            
+                send_all(clientfd, timeout_res, strlen(timeout_res));
             } else {
             perror("recv");
             }
             return;
         }
+
         if (bytes_read == 0) {
             printf("\n[fd=%d] disconnected\n", clientfd);
             return;
@@ -111,6 +123,92 @@ void handle_client(int clientfd) {
         if (large_request){
             break;
         }
+
+        char *header_end = strstr(buffer, "\r\n\r\n");
+        if (!header_end){
+            const char *bad = 
+                "HTTP/1.1 400 Bad Request\r\n"
+                "Content-Type: text/plain\r\n"
+                "Content-Length: 15\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+                "400 Bad Request\n";
+            send_all(clientfd, bad, strlen(bad));
+            break;  
+        }
+
+        size_t header_len = (header_end + 4) - buffer;
+        size_t already_have = total_read - header_len;
+
+        long content_length = 0;
+        char *cl = strcasestr(buffer, "Content-Length:");
+        if (cl) {
+            char *colon = strchr(cl, ':');
+            if (colon){
+            content_length = strtol(colon + 1, NULL, 10);
+            if (content_length < 0) content_length = 0;
+            }
+        }
+
+        if (content_length > MAX_BODY_SIZE){
+            const char *bad = 
+                "HTTP/1.1 413 Content Too Large\r\n"
+                "Content-Type: text/plain\r\n"
+                "Content-Length: 21\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+                "413 Content Too Large\n";
+            send_all(clientfd, bad, strlen(bad));
+            break; 
+        }
+
+        char *content = malloc(content_length + 1);
+        if (!content){
+            break;
+        }
+
+        if (already_have > 0){
+            memcpy( content, header_end + 4, already_have);
+        }
+
+        size_t total_body_read = already_have;
+
+        while (total_body_read < (size_t) content_length)
+        {
+            size_t missing_bytes = content_length - total_body_read;
+            ssize_t bytes_read = recv(clientfd, content + total_body_read, missing_bytes, 0);
+
+            if (bytes_read < 0) {
+            if(errno == EAGAIN || errno == EWOULDBLOCK){
+                printf("\n[fd=%d] Body read timeout hit. Closing connection.\n", clientfd);
+
+                const char *timeout_res = 
+                    "HTTP/1.1 408 Request Timeout\r\n"
+                    "Content-Type: text/plain\r\n"
+                    "Content-Length: 20\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                    "408 Request Timeout\n";
+            
+                send_all(clientfd, timeout_res, strlen(timeout_res));
+
+            } else {
+                perror("recv");
+            }
+            free(content);
+            return;
+            }
+            if (bytes_read == 0) {
+                printf("\n[fd=%d] disconnected\n", clientfd);
+                free(content);
+                return;
+            }
+
+            total_body_read += bytes_read;
+
+        }
+        content[total_body_read] = '\0';
+
         if (strcasestr(buffer, "Connection: close") != NULL) {
             keep_alive = 0;
         }
@@ -124,60 +222,106 @@ void handle_client(int clientfd) {
                 "\r\n"
                 "400 Bad Request\n";
             send_all(clientfd, bad, strlen(bad));
+            free(content);
             break;
         }
 
         if (strcmp(method, "GET") == 0){
             if (serve_static_file(clientfd, doc_root, path, keep_alive)){
-                 printf("\n[fd=%d] has been server static resource at path: %s \n", clientfd, path);
+                 printf("\n[fd=%d] has been served static resource at path: %s \n", clientfd, path);
 
                  if (!keep_alive) break;
 
+                 free(content);
+
                  continue;
+            } else {
+                printf("\n[fd=%d] Static file not found. Falling back to build_response.\n", clientfd);
             }
+
+            
+        } else if (strcmp(method, "POST") == 0) {
+            if (strcmp(path, "/echo") == 0){
+                char Echo_headers[BUFFER_SIZE];
+
+                int header_length = snprintf(Echo_headers, sizeof(Echo_headers),
+                    "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: text/plain\r\n"
+                    "Content-Length: %ld\r\n"
+                    "Connection: %s\r\n"
+                    "\r\n", 
+                    content_length, 
+                    keep_alive ? "keep-alive" : "close"
+                );
+
+                if (send_all(clientfd, Echo_headers, header_length) < 0){
+                    free(content);
+                    break;
+                }
+
+                if (content_length > 0){
+                    if (send_all(clientfd, content, content_length) < 0){
+                        free(content);
+                        break;
+                    }
+                }
+
+                printf("\n[fd=%d] Echoed %ld body bytes back to client\n", clientfd, content_length);
+
+                free(content);
+
+                if (!keep_alive) break;
+
+                continue;
+            } else {
+                const char *bad = 
+                    "HTTP/1.1 404 NOT FOUND\r\n"
+                    "Content-Type: text/plain\r\n"
+                    "Content-Length: 13\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                    "404 NOT FOUND\n";
+                send_all(clientfd, bad, strlen(bad));
+                free(content);
+                break;
+            }
+        } else {
+                const char *bad = 
+                    "HTTP/1.1 405 Method Not Allowed\r\n"
+                    "Allow: GET, POST\r\n"
+                    "Content-Type: text/plain\r\n"
+                    "Content-Length: 23\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                    "405 Method Not Allowed\n";
+                send_all(clientfd, bad, strlen(bad));
+                free(content);
+                break;
         }
 
-        printf("\n[fd=%d] %s %s → handled\n", clientfd, method, path);
+        printf("\n[fd=%d] %s %s → handled via fallback\n", clientfd, method, path);
         
         build_response(method, path, keep_alive, response, sizeof(response), &response_len);
 
         if (response_len < 0 || response_len >= (int)sizeof(response)) {
             fprintf(stderr, "Response buffer too small\n");
+            free(content);
             break;
         }
 
        
         if (send_all(clientfd, response, response_len) < 0) {
+            printf("\n[fd=%d] %s %s → encountered errot while sending response\n", clientfd, method, path);
+            free(content);
             break;
         }
+
+        free(content);
 
         if (!keep_alive) {
             break;
         }
     }
-}
-
-void *client_thread(void *arg) {
-    int clientfd = *(int *)arg;
-    free(arg);
-
-    struct timeval start_time, finish_time;
-
-    gettimeofday(&start_time, NULL);
-
-    handle_client(clientfd);
-
-    gettimeofday(&finish_time, NULL);
-
-    double start_secs = start_time.tv_sec + (start_time.tv_usec / 1000000.0);
-    double end_secs = finish_time.tv_sec + (finish_time.tv_usec / 1000000.0);
-    double elapsed_time = end_secs - start_secs;
-
-    printf("\nDone attending to client on socket %d. Time taken: %.4f seconds.\n", clientfd, elapsed_time);
-
-    close(clientfd);
-
-    return NULL;
 }
 
 static int ends_with(const char *s, const char *suffix){
@@ -221,25 +365,40 @@ static const char *get_content_type(const char *path){
 
 static int build_file_path(const char *doc_root, const char *url_path,
                             char *out, size_t out_size){
-        if (url_path[0] != '/'){
-            return -1;
-        }
+                if (!url_path || url_path[0] != '/') return -1;
+                if (strstr(url_path, "..") != NULL) return -1 ;
 
-        if (strstr(url_path, "..") != NULL) {
-            return -1;
-        }
-        const char *final_url = url_path;
-        if (strcmp(url_path, "/") == 0) {
-            final_url = "/index.html";
-        }
+                const char *final_url = (strcmp(url_path, "/") == 0) ? "/index.html" : url_path;
+                
+                char candidate[PATH_MAX];
+                if (snprintf(candidate, sizeof(candidate), "%s%s", doc_root, final_url) >= (int)sizeof(candidate)){
+                    return -1;
+                }
 
-        int bytes_written = snprintf(out, out_size, "%s%s", doc_root, final_url);
+                char root_real[PATH_MAX];
+                char file_real[PATH_MAX];
 
-        if (bytes_written >= (int)out_size) {
-            return -1;
-        }
+                if (!realpath(doc_root, root_real)){
+                    return -1;
+                }
 
-        return 0; 
+                if (!realpath(candidate, file_real)){
+                    return -1;
+                }
+
+                size_t root_len = strlen(root_real);
+
+                if (strncmp(file_real, root_real, root_len) != 0){
+                    return -1;
+                }
+
+                if (file_real[root_len] !=  '\0' && file_real[root_len] != '/'){
+                    return -1;
+                }
+
+                if (strlen(file_real) >= out_size) return -1;
+                strcpy(out, file_real);
+                return 0;
 
 }
 
@@ -254,14 +413,17 @@ static int serve_static_file(int clientfd, const char *doc_root, const char *url
     if (file == NULL){
             return 0;
     }
+    long file_size;
 
     fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
+    if ((file_size = ftell(file)) < 0){
+        return 0;
+    }
     fseek(file, 0, SEEK_SET);
 
     const char *content_type = get_content_type(safe_path);
 
-    const char *connection_header = keep_alive ? "keep-value" : "close";
+    const char *connection_header = keep_alive ? "keep_value" : "close";
 
     char header_buffer[1024];
     int header_len = snprintf(header_buffer, sizeof(header_buffer), 
