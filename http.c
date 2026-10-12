@@ -14,7 +14,19 @@
 #define BUFFER_SIZE 4096
 #define MAX_BODY_SIZE (1024 * 1024)
 
-static int serve_static_file(int clientfd, const char *doc_root, const char *url_path, int keep_alive);
+typedef struct {
+    int response_code;
+    int status_code;
+
+}Path_Status_Error;
+
+typedef struct {
+    int response_code;
+    int status_code;
+    int still_alive;
+} Serve_Static_Cont_Resp;
+
+static Serve_Static_Cont_Resp serve_static_file(int clientfd, const char *doc_root, const char *url_path, int keep_alive);
 
 int parse_request(const char *buffer, char *method, char *path, char *version) {
     int matched = sscanf(buffer, "%15s %255s %15s", method, path, version);
@@ -63,8 +75,6 @@ void handle_client(int clientfd) {
     char method[16];
     char path[256];
     char version[16];
-    char response[BUFFER_SIZE];
-    int response_len;
 
     while (1) {
         int keep_alive = 1;
@@ -227,7 +237,10 @@ void handle_client(int clientfd) {
         }
 
         if (strcmp(method, "GET") == 0){
-            if (serve_static_file(clientfd, doc_root, path, keep_alive)){
+            Serve_Static_Cont_Resp res;
+
+            res = serve_static_file(clientfd, doc_root, path, keep_alive);
+            if (res.response_code){
                  printf("\n[fd=%d] has been served static resource at path: %s \n", clientfd, path);
 
                  if (!keep_alive) break;
@@ -236,8 +249,28 @@ void handle_client(int clientfd) {
 
                  continue;
             } else {
-                printf("\n[fd=%d] Static file not found. Falling back to build_response.\n", clientfd);
-            }
+                printf("\n[fd=%d] wasn't served any files.\n", clientfd);
+
+                if (res.status_code == 503){
+                    char bad_req[128];
+                    char body[128] = "503 Service Unavailable";
+                    char *status_str = "503 Service Unavailable";
+
+                    int badReq_len = snprintf(bad_req, sizeof(bad_req), 
+                    "HTTP/1.1 %s\r\n"
+                    "Content-Type: text/plain\r\n"
+                    "Content-Length: %zu\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                    "%s"
+                    ,status_str, strlen(body), body
+                    );
+
+                    send_all(clientfd, bad_req, badReq_len);
+                }
+
+                keep_alive = res.still_alive;
+            }   
 
             
         } else if (strcmp(method, "POST") == 0) {
@@ -249,9 +282,9 @@ void handle_client(int clientfd) {
                     "Content-Type: text/plain\r\n"
                     "Content-Length: %ld\r\n"
                     "Connection: %s\r\n"
-                    "\r\n", 
+                    "\r\n",
                     content_length, 
-                    keep_alive ? "keep-alive" : "close"
+                    keep_alive ? "keep_alive" : "close"
                 );
 
                 if (send_all(clientfd, Echo_headers, header_length) < 0){
@@ -297,23 +330,6 @@ void handle_client(int clientfd) {
                 send_all(clientfd, bad, strlen(bad));
                 free(content);
                 break;
-        }
-
-        printf("\n[fd=%d] %s %s → handled via fallback\n", clientfd, method, path);
-        
-        build_response(method, path, keep_alive, response, sizeof(response), &response_len);
-
-        if (response_len < 0 || response_len >= (int)sizeof(response)) {
-            fprintf(stderr, "Response buffer too small\n");
-            free(content);
-            break;
-        }
-
-       
-        if (send_all(clientfd, response, response_len) < 0) {
-            printf("\n[fd=%d] %s %s → encountered errot while sending response\n", clientfd, method, path);
-            free(content);
-            break;
         }
 
         free(content);
@@ -363,67 +379,152 @@ static const char *get_content_type(const char *path){
     return "application/octet-stream";
 }
 
-static int build_file_path(const char *doc_root, const char *url_path,
+static Path_Status_Error build_file_path(const char *doc_root, const char *url_path,
                             char *out, size_t out_size){
-                if (!url_path || url_path[0] != '/') return -1;
-                if (strstr(url_path, "..") != NULL) return -1 ;
+
+                Path_Status_Error res;
+                res.response_code = 0;
+                res.status_code = 200;
+                
+                if (!url_path || url_path[0] != '/'){
+                    res.response_code = -1;
+                    res.status_code = 400;
+                    return res;
+                }
+
+                if (strstr(url_path, "..") != NULL){
+                    printf("DEBUG: MATCH FOUND! Attempting to exit with 400 Bad Request...\n");
+
+                    res.response_code = -1;
+                    res.status_code = 400;
+                    return res;                    
+                }
 
                 const char *final_url = (strcmp(url_path, "/") == 0) ? "/index.html" : url_path;
                 
                 char candidate[PATH_MAX];
                 if (snprintf(candidate, sizeof(candidate), "%s%s", doc_root, final_url) >= (int)sizeof(candidate)){
-                    return -1;
+                    res.response_code = -1;
+                    res.status_code = 414;
+                    return res;
                 }
 
                 char root_real[PATH_MAX];
                 char file_real[PATH_MAX];
 
                 if (!realpath(doc_root, root_real)){
-                    return -1;
+                    res.response_code = -1;
+                    res.status_code = 500;
+                    return res;
                 }
 
                 if (!realpath(candidate, file_real)){
-                    return -1;
+                    res.response_code = -1;
+                    res.status_code = 404;
+                    return res;
                 }
 
                 size_t root_len = strlen(root_real);
 
                 if (strncmp(file_real, root_real, root_len) != 0){
-                    return -1;
+                    res.response_code = -1;
+                    res.status_code = 404;
+                    return res;
                 }
 
                 if (file_real[root_len] !=  '\0' && file_real[root_len] != '/'){
-                    return -1;
+                    res.response_code = -1;
+                    res.status_code = 404;
+                    return res;
                 }
 
-                if (strlen(file_real) >= out_size) return -1;
-                strcpy(out, file_real);
-                return 0;
+                if (strlen(file_real) >= out_size){
+                    res.response_code = -1;
+                    res.status_code = 500;
+                    return res;
+                };
 
+                strcpy(out, file_real);
+
+                return res;
 }
 
-static int serve_static_file(int clientfd, const char *doc_root, const char *url_path, int keep_alive){
+static Serve_Static_Cont_Resp serve_static_file(int clientfd, const char *doc_root, const char *url_path, int keep_alive){
+
+    Serve_Static_Cont_Resp Contents_Resp;
+
+    Contents_Resp.response_code = 1;
+    Contents_Resp.status_code = 200;
+    Contents_Resp.still_alive = keep_alive;
+
+    Path_Status_Error res;
+
     char safe_path[PATH_MAX];
 
-    if ((build_file_path(doc_root, url_path, safe_path, sizeof(safe_path))) != 0){
-        return 0;
+    res = build_file_path(doc_root, url_path, safe_path, sizeof(safe_path));
+
+    if (res.response_code != 0){
+        char bad_req[256];
+        char body[128];
+        const char* status_text;
+
+        if (res.status_code == 404){
+            status_text = "404 Not Found";
+            snprintf(body, sizeof(body), "404 NOT FOUND");
+        } else if (res.status_code == 500) {
+            status_text = "500 Internal Server Error";
+            snprintf(body, sizeof(body), "500 Internal Server Error");
+        } else if (res.status_code == 414) {
+            status_text = "414 Request-URI Too Long";
+            snprintf(body, sizeof(body), "414 Request-URI Too Long");
+        } else{
+            status_text = "400 BAD REQUEST";
+            snprintf(body, sizeof(body), "400 BAD REQUEST");
+        }
+
+        int badReq_len = snprintf(bad_req, sizeof(bad_req), 
+        "HTTP/1.1 %s\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "%s"
+        ,status_text, strlen(body), body
+        );
+
+        send_all(clientfd, bad_req, badReq_len);
+
+        Contents_Resp.response_code = 0;
+        Contents_Resp.status_code = res.status_code;
+        Contents_Resp.still_alive = 0;
+
+        return Contents_Resp;
     }
 
     FILE *file = fopen(safe_path, "rb");
     if (file == NULL){
-            return 0;
+           Contents_Resp.response_code = 0;
+           Contents_Resp.status_code = 503;
+           Contents_Resp.still_alive = 0;
+           
+           return Contents_Resp;
     }
+
     long file_size;
 
     fseek(file, 0, SEEK_END);
     if ((file_size = ftell(file)) < 0){
-        return 0;
+           Contents_Resp.response_code = 0;
+           Contents_Resp.status_code = 503;
+           Contents_Resp.still_alive = 0;
+           fclose(file);
+           return Contents_Resp;
     }
     fseek(file, 0, SEEK_SET);
 
     const char *content_type = get_content_type(safe_path);
 
-    const char *connection_header = keep_alive ? "keep_value" : "close";
+    const char *connection_header = keep_alive ? "keep-value" : "close";
 
     char header_buffer[1024];
     int header_len = snprintf(header_buffer, sizeof(header_buffer), 
@@ -445,5 +546,5 @@ static int serve_static_file(int clientfd, const char *doc_root, const char *url
     }
 
     fclose(file);
-    return 1;
+    return Contents_Resp;
 }
