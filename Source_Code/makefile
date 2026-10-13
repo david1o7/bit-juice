@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -g -pthread
+CFLAGS = -Wall -Wextra -g -pthread -I../Header_files
 LDFLAGS = -pthread
 
 SRCS = main.c server.c http.c

@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
-#include "http.h"
-#include "server.h"
+#include "../Header_files/http.h"
+#include "../Header_files/server.h"
 
 #include <sys/time.h>
 #include <errno.h>
@@ -393,8 +393,6 @@ static Path_Status_Error build_file_path(const char *doc_root, const char *url_p
                 }
 
                 if (strstr(url_path, "..") != NULL){
-                    printf("DEBUG: MATCH FOUND! Attempting to exit with 400 Bad Request...\n");
-
                     res.response_code = -1;
                     res.status_code = 400;
                     return res;                    

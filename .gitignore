@@ -1,2 +1,4 @@
 *.o
 http_server
+test_server
+wrk/

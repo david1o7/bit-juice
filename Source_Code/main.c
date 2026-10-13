@@ -1,5 +1,5 @@
-#include "server.h"
-#include "http.h"
+#include "../Header_files/http.h"
+#include "../Header_files/server.h"
 
 #include <stdio.h>
 #include <errno.h>
@@ -28,7 +28,7 @@ int queue_tail = 0;
 pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t queue_cond  = PTHREAD_COND_INITIALIZER;
 
-extern const char *doc_root = "./public";
+const char *doc_root = "./public";
 int read_timeout_sec = 12;
 
 volatile int localserverfd = -1;
