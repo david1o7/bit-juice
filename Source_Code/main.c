@@ -13,7 +13,7 @@
 #include <arpa/inet.h>
 #include <sys/time.h> 
 #include <time.h> 
-#include <getopt.h>  
+#include <getopt.h>
 
 #define THREAD_POOL_SIZE 8
 #define QUEUE_SIZE 128
@@ -21,6 +21,7 @@
 
 int PORT = 8080;
 int client_queue[QUEUE_SIZE];
+int g_verbose = 0;
 int queue_count = 0;
 int queue_head = 0;
 int queue_tail = 0;
@@ -28,8 +29,9 @@ int queue_tail = 0;
 pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t queue_cond  = PTHREAD_COND_INITIALIZER;
 
-const char *doc_root = "./public";
+const char *doc_root = "../public";
 int read_timeout_sec = 12;
+char *g_doc_root = NULL;
 
 volatile int localserverfd = -1;
 volatile sig_atomic_t running = 1;
@@ -81,18 +83,23 @@ void *worker_thread(void *arg){
         pthread_mutex_unlock(&queue_mutex);
 
         struct timeval start_time, finish_time;
-
+        if (g_verbose){
         gettimeofday(&start_time, NULL);
+        }
 
         handle_client(clientfd);
 
+        if (g_verbose){
         gettimeofday(&finish_time, NULL);
-
+        }
+        
+        if (g_verbose){
         double start_secs = start_time.tv_sec + (start_time.tv_usec / 1000000.0);
         double end_secs = finish_time.tv_sec + (finish_time.tv_usec / 1000000.0);
         double elapsed_time = end_secs - start_secs;
 
         printf("\n[fd=%d] timeout: %.4f s.\n", clientfd, elapsed_time);
+        }
 
         close(clientfd);
     }
@@ -119,11 +126,12 @@ int main(int argc, char *argv[]) {
         {"port",    required_argument, 0, 'p'},
         {"dir",     required_argument, 0, 'd'},
         {"timeout", required_argument, 0, 't'},
+        {"verbose", no_argument, 0, 'v'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while((opt = getopt_long(argc, argv,"p:d:t:", long_options, NULL)) != -1){
+    while((opt = getopt_long(argc, argv,"p:d:t:v", long_options, NULL)) != -1){
         switch(opt){
                 case 'p':
                     PORT = atoi(optarg); 
@@ -134,8 +142,11 @@ int main(int argc, char *argv[]) {
                 case 't':
                     read_timeout_sec = atoi(optarg);
                     break;
+                case 'v':
+                    g_verbose = 1;
+                    break;
                 case '?': 
-                    printf("Usage: %s [-p port] [-d directory]\n", argv[0]);
+                    fprintf(stderr, "Usage: %s [-p port] [-d directory] [-t timeout] [-v]\n", argv[0]);
                     return 1;
         }
     }
@@ -157,6 +168,18 @@ int main(int argc, char *argv[]) {
 
     printf("Server listening on port %d...\n", PORT);
 
+    char *resolved = realpath(doc_root, NULL);
+
+    if (resolved == NULL) {
+    perror("realpath");
+    return 1;
+    }
+
+    g_doc_root = resolved;
+    
+    if (g_verbose){
+    printf("Serving from %s\n", g_doc_root);
+    }
     while (running) {
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
@@ -180,12 +203,15 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
+        if (g_verbose){
         printf("\n[fd=%d] IP → %s\n", clientfd, inet_ntoa(client_addr.sin_addr));
+        }
 
         enqueue_client(clientfd);
 
     }
     printf("Shutting down server!.. \n\n");
+    free(resolved);
     close(server_fd);
 
     pthread_mutex_lock(&queue_mutex);

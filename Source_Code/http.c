@@ -9,7 +9,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
-#include <limits.h>
+#include <sys/sendfile.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 #define BUFFER_SIZE 4096
 #define MAX_BODY_SIZE (1024 * 1024)
@@ -99,7 +101,9 @@ void handle_client(int clientfd) {
 
         if (bytes_read < 0) {
             if(errno == EAGAIN || errno == EWOULDBLOCK){
+                if (g_verbose){
                 printf("\n[fd=%d] Header read timeout hit. Closing connection.\n", clientfd);
+                }
 
                 const char *timeout_res = 
                     "HTTP/1.1 408 Request Timeout\r\n"
@@ -117,7 +121,9 @@ void handle_client(int clientfd) {
         }
 
         if (bytes_read == 0) {
+            if (errno != EPIPE && errno != ECONNRESET){
             printf("\n[fd=%d] disconnected\n", clientfd);
+            }
             return;
         }
 
@@ -190,7 +196,9 @@ void handle_client(int clientfd) {
 
             if (bytes_read < 0) {
             if(errno == EAGAIN || errno == EWOULDBLOCK){
+                if (g_verbose){
                 printf("\n[fd=%d] Body read timeout hit. Closing connection.\n", clientfd);
+                }
 
                 const char *timeout_res = 
                     "HTTP/1.1 408 Request Timeout\r\n"
@@ -239,9 +247,11 @@ void handle_client(int clientfd) {
         if (strcmp(method, "GET") == 0){
             Serve_Static_Cont_Resp res;
 
-            res = serve_static_file(clientfd, doc_root, path, keep_alive);
+            res = serve_static_file(clientfd, g_doc_root, path, keep_alive);
             if (res.response_code){
+                if (g_verbose){
                  printf("\n[fd=%d] has been served static resource at path: %s \n", clientfd, path);
+                }
 
                  if (!keep_alive) break;
 
@@ -249,7 +259,9 @@ void handle_client(int clientfd) {
 
                  continue;
             } else {
+                if (g_verbose){
                 printf("\n[fd=%d] wasn't served any files.\n", clientfd);
+                }
 
                 if (res.status_code == 503){
                     char bad_req[128];
@@ -298,8 +310,9 @@ void handle_client(int clientfd) {
                         break;
                     }
                 }
-
+                if (g_verbose){
                 printf("\n[fd=%d] Echoed %ld body bytes back to client\n", clientfd, content_length);
+                }
 
                 free(content);
 
@@ -407,14 +420,7 @@ static Path_Status_Error build_file_path(const char *doc_root, const char *url_p
                     return res;
                 }
 
-                char root_real[PATH_MAX];
                 char file_real[PATH_MAX];
-
-                if (!realpath(doc_root, root_real)){
-                    res.response_code = -1;
-                    res.status_code = 500;
-                    return res;
-                }
 
                 if (!realpath(candidate, file_real)){
                     res.response_code = -1;
@@ -422,9 +428,9 @@ static Path_Status_Error build_file_path(const char *doc_root, const char *url_p
                     return res;
                 }
 
-                size_t root_len = strlen(root_real);
+                size_t root_len = strlen(doc_root);
 
-                if (strncmp(file_real, root_real, root_len) != 0){
+                if (strncmp(file_real, doc_root, root_len) != 0){
                     res.response_code = -1;
                     res.status_code = 404;
                     return res;
@@ -499,26 +505,24 @@ static Serve_Static_Cont_Resp serve_static_file(int clientfd, const char *doc_ro
         return Contents_Resp;
     }
 
-    FILE *file = fopen(safe_path, "rb");
-    if (file == NULL){
-           Contents_Resp.response_code = 0;
-           Contents_Resp.status_code = 503;
-           Contents_Resp.still_alive = 0;
-           
-           return Contents_Resp;
+    int fd = open(safe_path, O_RDONLY);
+    if (fd < 0){
+        Contents_Resp.response_code = 0;
+        Contents_Resp.status_code = 503;
+        Contents_Resp.still_alive = 0;
+        return Contents_Resp;
     }
 
-    long file_size;
-
-    fseek(file, 0, SEEK_END);
-    if ((file_size = ftell(file)) < 0){
-           Contents_Resp.response_code = 0;
-           Contents_Resp.status_code = 503;
-           Contents_Resp.still_alive = 0;
-           fclose(file);
-           return Contents_Resp;
+    struct stat st;
+    if (fstat(fd, &st) < 0){
+        Contents_Resp.response_code = 0;
+        Contents_Resp.status_code = 503;
+        Contents_Resp.still_alive = 0;
+        close(fd);
+        return Contents_Resp;
     }
-    fseek(file, 0, SEEK_SET);
+
+    off_t file_size = st.st_size;
 
     const char *content_type = get_content_type(safe_path);
 
@@ -536,13 +540,24 @@ static Serve_Static_Cont_Resp serve_static_file(int clientfd, const char *doc_ro
 
     send_all(clientfd, header_buffer, header_len);
 
-    char file_buffer[4096];
-    size_t bytes_read;
+    off_t offset = 0;
 
-    while ((bytes_read = fread(file_buffer, 1, sizeof(file_buffer), file)) > 0){
-        send_all(clientfd, file_buffer, bytes_read);
+    while (offset < file_size){
+    ssize_t n = sendfile(clientfd, fd, &offset, file_size - offset);
+
+        if (n < 0){
+            if (errno != EPIPE && errno != ECONNRESET){
+            perror("sendfile");
+            }
+            Contents_Resp.response_code = 0;
+            Contents_Resp.status_code = 503;
+            Contents_Resp.still_alive = 0;
+            close(fd);
+            return Contents_Resp;
+        }
+    offset += n;
     }
 
-    fclose(file);
+    close(fd);
     return Contents_Resp;
 }

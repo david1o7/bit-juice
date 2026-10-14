@@ -1,6 +1,7 @@
 #include "../Header_files/server.h"
 
 #include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -49,7 +50,9 @@ int send_all(int fd, const char *data, size_t len) {
     while (total_sent < len) {
         ssize_t n = send(fd, data + total_sent, len - total_sent, 0);
         if (n < 0) {
+            if (errno != EPIPE && errno != ECONNRESET){
             perror("send");
+            }
             return -1;
         }
         total_sent += n;
