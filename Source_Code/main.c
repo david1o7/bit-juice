@@ -14,6 +14,8 @@
 #include <sys/time.h> 
 #include <time.h> 
 #include <getopt.h>
+#include <fcntl.h>
+#include <sys/epoll.h>
 
 #define THREAD_POOL_SIZE 8
 #define QUEUE_SIZE 128
@@ -24,7 +26,10 @@ int client_queue[QUEUE_SIZE];
 int g_verbose = 0;
 int queue_count = 0;
 int queue_head = 0;
+int running = 1;
 int queue_tail = 0;
+
+
 
 pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t queue_cond  = PTHREAD_COND_INITIALIZER;
@@ -33,197 +38,71 @@ const char *doc_root = "../public";
 int read_timeout_sec = 12;
 char *g_doc_root = NULL;
 
-volatile int localserverfd = -1;
-volatile sig_atomic_t running = 1;
-pthread_t workers[THREAD_POOL_SIZE];
-
-void enqueue_client(int clientfd){
-    pthread_mutex_lock(&queue_mutex);
-
-    if (queue_count == QUEUE_SIZE){
-        const char *bad = 
-                "HTTP/1.1 503 Service Unavailable\r\n"
-                "Content-Type: text/plain\r\n"
-                "Content-Length: 25\r\n"
-                "Connection: close\r\n"
-                "\r\n"
-                "Please try again shortly.\n";
-
-        send_all(clientfd, bad, strlen(bad));
-        close(clientfd);
-    } else {
-        client_queue[queue_tail] = clientfd;
-        queue_tail = (queue_tail + 1) & QUEUE_MASK;
-        queue_count++;
-        pthread_cond_signal(&queue_cond);
-    }
-
-    pthread_mutex_unlock(&queue_mutex);
+static int set_nonblocking(int fd){
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) return -1;
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-void *worker_thread(void *arg){
-    (void) arg;
-
-    while(1) {
-        pthread_mutex_lock(&queue_mutex);
-
-        while(queue_count == 0 && running){
-            pthread_cond_wait(&queue_cond, &queue_mutex);
-        }
-
-        if (!running && queue_count == 0) {
-            pthread_mutex_unlock(&queue_mutex);
-            break;
-        }
-
-        int clientfd = client_queue[queue_head];
-        queue_head = (queue_head + 1) & QUEUE_MASK;
-        queue_count--;
-
-        pthread_mutex_unlock(&queue_mutex);
-
-        struct timeval start_time, finish_time;
-        if (g_verbose){
-        gettimeofday(&start_time, NULL);
-        }
-
-        handle_client(clientfd);
-
-        if (g_verbose){
-        gettimeofday(&finish_time, NULL);
-        }
-        
-        if (g_verbose){
-        double start_secs = start_time.tv_sec + (start_time.tv_usec / 1000000.0);
-        double end_secs = finish_time.tv_sec + (finish_time.tv_usec / 1000000.0);
-        double elapsed_time = end_secs - start_secs;
-
-        printf("\n[fd=%d] timeout: %.4f s.\n", clientfd, elapsed_time);
-        }
-
-        close(clientfd);
-    }
-
-    return NULL;
-}
-
-void handle_signal(int sig){
-    (void) sig;
-    running = 0;
-
-    if (localserverfd != -1){
-        shutdown(localserverfd, SHUT_RDWR);
-    }
-}
-
-int main(int argc, char *argv[]) {
-
-    signal(SIGPIPE, SIG_IGN);
-    signal(SIGINT, handle_signal);
-    signal(SIGTERM, handle_signal);
-
-    struct option long_options[] = {
-        {"port",    required_argument, 0, 'p'},
-        {"dir",     required_argument, 0, 'd'},
-        {"timeout", required_argument, 0, 't'},
-        {"verbose", no_argument, 0, 'v'},
-        {0, 0, 0, 0}
-    };
-
-    int opt;
-    while((opt = getopt_long(argc, argv,"p:d:t:v", long_options, NULL)) != -1){
-        switch(opt){
-                case 'p':
-                    PORT = atoi(optarg); 
-                    break;
-                case 'd':
-                    doc_root = optarg;
-                    break;
-                case 't':
-                    read_timeout_sec = atoi(optarg);
-                    break;
-                case 'v':
-                    g_verbose = 1;
-                    break;
-                case '?': 
-                    fprintf(stderr, "Usage: %s [-p port] [-d directory] [-t timeout] [-v]\n", argv[0]);
-                    return 1;
-        }
-    }
+int main(void) {
 
     int server_fd = create_server_socket(PORT);
     if (server_fd < 0) {
         return 1;
     }
 
-    localserverfd = server_fd;
-
-    for (int i = 0; i < THREAD_POOL_SIZE; i++){
-        if (pthread_create(&workers[i], NULL, worker_thread, NULL) != 0){
-            perror("pthread_create_worker");
-            close(server_fd);
-            return 1;
-        }
+    if (set_nonblocking(server_fd) < 0){
+        perror("set_nonblocking");
+        close(server_fd);
+        return 1;
     }
 
-    printf("Server listening on port %d...\n", PORT);
-
-    char *resolved = realpath(doc_root, NULL);
-
-    if (resolved == NULL) {
-    perror("realpath");
-    return 1;
+    int epfd = epoll_create1(0);
+    if (epfd < 0){
+        perror("epoll_create1");
+        close(server_fd);
+        return 1;
     }
 
-    g_doc_root = resolved;
-    
-    if (g_verbose){
-    printf("Serving from %s\n", g_doc_root);
+    struct epoll_event ev;
+    ev.events = EPOLLIN;
+    ev.data.fd = server_fd;
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, server_fd, &ev) < 0){
+        perror("epoll_ctl");
+        close(server_fd);
+        return 1;
     }
+
+    struct epoll_event events[64];
+
     while (running) {
-        struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
-
-        int clientfd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
-        if (clientfd < 0) {
-            if (!running || errno == EINTR || errno == EBADF){
+        int n = epoll_wait(epfd, events, 64, 1000);
+        if (n < 0){
+            if (errno == EINTR) continue;
+            perror("epoll_wait");
             break;
+        }
+
+        for (int i = 0;i < n; i++){
+            if (events[i].data.fd != server_fd) continue;
+
+            for (;;) {
+            struct sockaddr_in addr;
+            socklen_t len = sizeof(addr);
+            int cfd = accept(server_fd, (struct sockaddr *)&addr, &len);
+
+            if (cfd < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) break; 
+                if (errno == EINTR) continue;
+                perror("accept");
+                break;
             }
-            perror("accept");
-            continue;
+
+            printf("accepted fd=%d from %s\n", cfd, inet_ntoa(addr.sin_addr));
+            close(cfd);
+            }
         }
-
-        struct timeval timeout;
-        timeout.tv_sec = read_timeout_sec;
-        timeout.tv_usec = 0;
-
-        if (setsockopt(clientfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
-            perror("socksockopt SO_RCVTIMEO");
-            close(clientfd);
-            continue;
-        }
-
-        if (g_verbose){
-        printf("\n[fd=%d] IP → %s\n", clientfd, inet_ntoa(client_addr.sin_addr));
-        }
-
-        enqueue_client(clientfd);
-
     }
-    printf("Shutting down server!.. \n\n");
-    free(resolved);
     close(server_fd);
-
-    pthread_mutex_lock(&queue_mutex);
-    pthread_cond_broadcast(&queue_cond);
-    pthread_mutex_unlock(&queue_mutex);
-
-    for (int i = 0; i < THREAD_POOL_SIZE; i++) {
-        pthread_join(workers[i], NULL);
-    }
-
-    pthread_mutex_destroy(&queue_mutex);
-    pthread_cond_destroy(&queue_cond);
-
-    return 0;
+    close(epfd);
 }
