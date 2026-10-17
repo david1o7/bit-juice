@@ -19,17 +19,25 @@
 
 #define THREAD_POOL_SIZE 8
 #define QUEUE_SIZE 128
-#define QUEUE_MASK (QUEUE_SIZE - 1) 
+#define QUEUE_MASK (QUEUE_SIZE - 1)
+
+volatile sig_atomic_t running = 1;
+volatile sig_atomic_t localfd = -1;
 
 int PORT = 8080;
 int client_queue[QUEUE_SIZE];
 int g_verbose = 0;
 int queue_count = 0;
 int queue_head = 0;
-int running = 1;
 int queue_tail = 0;
 
+void handle_sig(int val){
+    (void) val;
 
+    if (localfd != -1){
+        running = 0;
+    }
+}
 
 pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t queue_cond  = PTHREAD_COND_INITIALIZER;
@@ -46,10 +54,15 @@ static int set_nonblocking(int fd){
 
 int main(void) {
 
+    signal(SIGINT, handle_sig);
+    signal(SIGTERM, handle_sig);
+
     int server_fd = create_server_socket(PORT);
     if (server_fd < 0) {
         return 1;
     }
+
+    localfd = server_fd;
 
     if (set_nonblocking(server_fd) < 0){
         perror("set_nonblocking");
