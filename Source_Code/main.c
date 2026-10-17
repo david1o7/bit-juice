@@ -22,7 +22,7 @@
 #define QUEUE_MASK (QUEUE_SIZE - 1)
 
 volatile sig_atomic_t running = 1;
-volatile sig_atomic_t localfd = -1;
+volatile int localfd = -1;
 
 int PORT = 8080;
 int client_queue[QUEUE_SIZE];
@@ -33,9 +33,10 @@ int queue_tail = 0;
 
 void handle_sig(int val){
     (void) val;
+    running = 0;
 
     if (localfd != -1){
-        running = 0;
+        shutdown(localfd, SHUT_RDWR);
     }
 }
 
@@ -56,6 +57,7 @@ int main(void) {
 
     signal(SIGINT, handle_sig);
     signal(SIGTERM, handle_sig);
+    signal(SIGPIPE, SIG_IGN);
 
     int server_fd = create_server_socket(PORT);
     if (server_fd < 0) {
@@ -78,13 +80,17 @@ int main(void) {
     }
 
     struct epoll_event ev;
+    memset(&ev, 0, sizeof(ev));
     ev.events = EPOLLIN;
     ev.data.fd = server_fd;
+
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, server_fd, &ev) < 0){
         perror("epoll_ctl");
         close(server_fd);
         return 1;
     }
+
+    printf("server listening on port %d...\n", PORT);
 
     struct epoll_event events[64];
 
@@ -97,25 +103,86 @@ int main(void) {
         }
 
         for (int i = 0;i < n; i++){
-            if (events[i].data.fd != server_fd) continue;
+            int fd = events[i].data.fd ;
+            uint32_t what = events[i].events;
 
-            for (;;) {
-            struct sockaddr_in addr;
-            socklen_t len = sizeof(addr);
-            int cfd = accept(server_fd, (struct sockaddr *)&addr, &len);
 
-            if (cfd < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) break; 
-                if (errno == EINTR) continue;
-                perror("accept");
-                break;
+            if (fd == server_fd){
+                for (;;) {
+                struct sockaddr_in addr;
+                socklen_t len = sizeof(addr);
+                int cfd = accept(server_fd, (struct sockaddr *)&addr, &len);
+
+                if (cfd < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) break; 
+                    if (errno == EINTR) continue;
+                    perror("accept");
+                    break;
+                }
+
+                printf("accepted fd=%d from %s\n", cfd, inet_ntoa(addr.sin_addr));
+
+                if (set_nonblocking(cfd) < 0){
+                    perror("cfd_nonblocking");
+                    close(cfd);
+                    continue;
+                }
+
+                struct epoll_event cfd_ev;
+                memset(&cfd_ev, 0, sizeof(cfd_ev));
+                cfd_ev.events = EPOLLIN | EPOLLRDHUP;
+                cfd_ev.data.fd = cfd;
+
+                if (epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &cfd_ev) < 0){
+                    perror("epoll_ctl ADD client");
+                    close(cfd);
+                    continue;
+                }
+
+                printf("accepted [fd=%d] (watching for read)\n", cfd);
+
+                }
+                continue;
+            }
+            
+            if (what & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+                printf("[fd=%d] hangup/error\n", fd);
+                epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                close(fd);
+                continue;
             }
 
-            printf("accepted fd=%d from %s\n", cfd, inet_ntoa(addr.sin_addr));
-            close(cfd);
+            if (what & EPOLLIN){
+                char buffer[4096];
+                ssize_t r = recv(fd, buffer, sizeof(buffer) - 1, 0);
+
+                if (r < 0){
+                    if (errno == EAGAIN || errno == EWOULDBLOCK){
+                        continue;
+                    }
+                    perror("recv");
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                    close(fd);
+                    continue;
+                }
+
+                if (r == 0){
+                    printf("[fd= %d] client closed\n", fd);
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                    close(fd);
+                    continue;
+                }
+
+                buffer[r] = '\0';
+                printf("[fd=%d] got %zd bytes:\n%s\n", fd, r, buffer);
+
+                epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                close(fd);
             }
         }
     }
-    close(server_fd);
+    printf("Shutting down\n");
     close(epfd);
+    close(server_fd);
+    return 0;
 }
