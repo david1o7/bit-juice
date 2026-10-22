@@ -176,6 +176,46 @@ int main(void) {
                 buffer[r] = '\0';
                 printf("[fd=%d] got %zd bytes:\n%s\n", fd, r, buffer);
 
+                char resp[256];
+                char *body = "Hello from bitjuice via epoll";
+
+                int s = snprintf(resp, sizeof(resp), 
+                    "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: text/plain\r\n"
+                    "Content-Length: %zu\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                    "%s\n",
+                    strlen(body), body
+                );
+
+                if (s < 0){
+                    fprintf(stderr, "Snprintf encountered an error");
+                    printf("[fd= %d] client closed\n", fd);
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                    close(fd);
+                    continue;
+                }
+
+                size_t len = strlen(resp);
+                size_t sent = 0;
+
+                while (sent < len){
+                    ssize_t n = send(fd, resp + sent, len - sent, 0);
+                    if (n < 0){
+                        if (errno == EAGAIN || errno == EWOULDBLOCK){
+                            printf("[fd=%d] socket not ready to write yet\n", fd);
+                            break;
+                        }
+                        if (errno == EPIPE || errno == ECONNRESET){
+                            break;
+                        }
+                        perror("send");
+                        break;
+                    }
+                    sent += (size_t)n;
+                }
+
                 epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
                 close(fd);
             }
