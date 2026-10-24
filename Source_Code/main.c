@@ -21,6 +21,14 @@
 #define QUEUE_SIZE 128
 #define QUEUE_MASK (QUEUE_SIZE - 1)
 
+#define RECV_BUF_SIZE 4096
+
+typedef struct {
+    int fd;
+    char buf[RECV_BUF_SIZE];
+    size_t len;
+} connection_t;
+
 volatile sig_atomic_t running = 1;
 volatile int localfd = -1;
 
@@ -38,6 +46,19 @@ void handle_sig(int val){
     if (localfd != -1){
         shutdown(localfd, SHUT_RDWR);
     }
+}
+
+int parse_req_line(const char *buf, char *method, size_t method_sz, char *path, size_t path_sz){
+    if (method_sz < (size_t)15 || path_sz < (size_t)255){
+        printf("path and method buffer size too small to hold values!");
+        return 0;
+    }
+    if (sscanf(buf, "%15s %255s", method, path) < 2){
+        return 0;
+    }
+    (void)method_sz;
+    (void)path_sz;
+    return 1;
 }
 
 pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -103,11 +124,8 @@ int main(void) {
         }
 
         for (int i = 0;i < n; i++){
-            int fd = events[i].data.fd ;
-            uint32_t what = events[i].events;
 
-
-            if (fd == server_fd){
+            if (events[i].data.fd == server_fd){
                 for (;;) {
                 struct sockaddr_in addr;
                 socklen_t len = sizeof(addr);
@@ -128,13 +146,23 @@ int main(void) {
                     continue;
                 }
 
+                connection_t *c = calloc(1, sizeof(*c));
+                if (!c){
+                    close(server_fd);
+                    continue;
+                }
+
+                c->fd = cfd;
+                c->len = 0;
+
                 struct epoll_event cfd_ev;
                 memset(&cfd_ev, 0, sizeof(cfd_ev));
                 cfd_ev.events = EPOLLIN | EPOLLRDHUP;
-                cfd_ev.data.fd = cfd;
+                cfd_ev.data.ptr = c;
 
                 if (epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &cfd_ev) < 0){
                     perror("epoll_ctl ADD client");
+                    free(c);
                     close(cfd);
                     continue;
                 }
@@ -144,6 +172,10 @@ int main(void) {
                 }
                 continue;
             }
+
+            connection_t *c = events[i].data.ptr;
+            uint32_t what = events[i].events;
+            int fd = c->fd;
             
             if (what & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
                 printf("[fd=%d] hangup/error\n", fd);
@@ -153,14 +185,21 @@ int main(void) {
             }
 
             if (what & EPOLLIN){
-                char buffer[4096];
-                ssize_t r = recv(fd, buffer, sizeof(buffer) - 1, 0);
+                if (c->len > RECV_BUF_SIZE - 1){
+                    printf("[fd= %d] Snprintf error, client closed\n", fd);
+                    free(c);
+                    close(fd);
+                    continue;
+                }
+
+                ssize_t r = recv(fd, c->buf + c->len, RECV_BUF_SIZE - 1 - c->len, 0);
 
                 if (r < 0){
                     if (errno == EAGAIN || errno == EWOULDBLOCK){
                         continue;
                     }
                     perror("recv");
+                    free(c);
                     epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
                     close(fd);
                     continue;
@@ -168,32 +207,61 @@ int main(void) {
 
                 if (r == 0){
                     printf("[fd= %d] client closed\n", fd);
+                    free(c);
                     epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
                     close(fd);
                     continue;
                 }
 
-                buffer[r] = '\0';
-                printf("[fd=%d] got %zd bytes:\n%s\n", fd, r, buffer);
+                c->len += (size_t)r;
+                c->buf[c->len] = '\0';
 
-                char resp[256];
-                char *body = "Hello from bitjuice via epoll";
+                if (strstr(c->buf, "\r\n\r\n") == NULL){
+                    continue;
+                }
+
+                printf("fd=%d full headers:\n%s\n", fd, c->buf);
+
+                char method[16];
+                char path[256];
+
+                const char *status;
+                const char *body;
+
+                if (!parse_req_line(c->buf, method, sizeof(method), path, sizeof(path))){
+                    status = "HTTP/1.1 400 Bad Request";
+                    body = "Bad Request\n";
+                    } else if (strcmp(method, "GET") != 0) {
+                        status = "HTTP/1.1 405 Method Not Allowed";
+                        body = "Method Not Allowed\n";
+                    } else if (strcmp(path, "/") == 0 || strcmp(path, "/home") == 0) {
+                        status = "HTTP/1.1 200 OK";
+                        body = "Home page (epoll)\n";
+                    } else if (strcmp(path, "/about") == 0) {
+                        status = "HTTP/1.1 200 OK";
+                        body = "About page (epoll)\n";
+                    } else {
+                        status = "HTTP/1.1 404 Not Found";
+                        body = "Not Found\n";
+                    }
+
+                char resp[1024];
 
                 int s = snprintf(resp, sizeof(resp), 
-                    "HTTP/1.1 200 OK\r\n"
+                    "%s\r\n"
                     "Content-Type: text/plain\r\n"
                     "Content-Length: %zu\r\n"
                     "Connection: close\r\n"
                     "\r\n"
                     "%s\n",
-                    strlen(body), body
+                    status,strlen(body), body
                 );
 
-                if (s < 0){
-                    fprintf(stderr, "Snprintf encountered an error");
-                    printf("[fd= %d] client closed\n", fd);
+                if (s < 0 || s >= (int)sizeof(resp)){
+                    printf("[fd= %d] Snprintf error or response size larger than allocated buffer size\n", fd);
                     epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
                     close(fd);
+                    free(c);
                     continue;
                 }
 
@@ -218,6 +286,7 @@ int main(void) {
 
                 epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
                 close(fd);
+                free(c);
             }
         }
     }
