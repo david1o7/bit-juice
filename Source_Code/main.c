@@ -33,11 +33,6 @@ volatile sig_atomic_t running = 1;
 volatile int localfd = -1;
 
 int PORT = 8080;
-int client_queue[QUEUE_SIZE];
-int g_verbose = 0;
-int queue_count = 0;
-int queue_head = 0;
-int queue_tail = 0;
 
 void handle_sig(int val){
     (void) val;
@@ -61,12 +56,7 @@ int parse_req_line(const char *buf, char *method, size_t method_sz, char *path, 
     return 1;
 }
 
-pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t queue_cond  = PTHREAD_COND_INITIALIZER;
-
-const char *doc_root = "../public";
-int read_timeout_sec = 12;
-char *g_doc_root = NULL;
+char *g_doc_root = NULL; 
 
 static int set_nonblocking(int fd){
     int flags = fcntl(fd, F_GETFL, 0);
@@ -84,6 +74,17 @@ int main(void) {
     if (server_fd < 0) {
         return 1;
     }
+    // TODO: check why this g_doc_root is meant to be freed at server shutdown & fast error quit.
+
+    const char *doc_root = "../public";
+    g_doc_root = realpath(doc_root, NULL);
+
+    if (!g_doc_root){
+        perror("realpath(doc_root)");
+        return 1;
+    }
+
+    printf("serving from %s\n", g_doc_root);
 
     localfd = server_fd;
 
